@@ -16,7 +16,7 @@ set -e
 # ═══════════════════════════════════════════════════════════════════════════════
 
 APP_NAME="docker-updater"
-APP_VERSION="1.2.0"
+APP_VERSION="1.3.0"
 APP_DESCRIPTION="Docker Container Auto-Update Manager"
 
 INSTALL_PATH="/usr/local/bin/$APP_NAME"
@@ -214,6 +214,25 @@ send_notification() {
     local message="$2"
     local project_name="$3"
     
+    local notify_script="$CONFIG_DIR/notify.sh"
+    if [ -f "$notify_script" ]; then
+         if [ ! -x "$notify_script" ]; then
+             log_warn "Notification script $notify_script is not executable. Skipping."
+         else
+             local script_owner
+             script_owner=$(stat -c '%u' "$notify_script" 2>/dev/null || stat -f '%u' "$notify_script" 2>/dev/null)
+             
+             if [ "$EUID" -eq 0 ] && [ "$script_owner" != "0" ]; then
+                 log_warn "Notification script $notify_script not owned by root. Skipping for security."
+             else
+                 if "$notify_script" "$status" "$message" "$project_name"; then
+                     return 0
+                 fi
+                 log_warn "Notification script failed. Falling back to webhook."
+             fi
+         fi
+    fi
+
     if [ ! -f "$GLOBAL_CONFIG_FILE" ]; then
         return 0
     fi
@@ -1046,7 +1065,15 @@ cmd_update() {
     if wait_for_health "$health_timeout"; then
         log_success "All services healthy."
         
-        run_hook "$dir" "post-update.sh"
+        if ! run_hook "$dir" "post-update.sh"; then
+            log_error "Post-update hook failed! Rolling back..."
+            perform_rollback "$rollback_file"
+            log "${RED}═══════════════════════════════════════════════════════════${NC}"
+            log "${RED}  Update failed and rolled back at $(date)${NC}"
+            log "${RED}═══════════════════════════════════════════════════════════${NC}"
+            send_notification "failure" "Update failed and rolled back for $name (Post-hook Failed)" "$name"
+            return 1
+        fi
         
         log_info "Cleaning up old images..."
         docker image prune -f
@@ -1117,7 +1144,14 @@ cmd_update_single() {
     health_timeout="${health_timeout:-60}"
 
     if wait_for_health "$health_timeout"; then
-        run_hook "$dir" "post-update.sh"
+        if ! run_hook "$dir" "post-update.sh"; then
+            echo "ERROR: Post-update hook failed! Rolling back..."
+            perform_rollback "$rollback_file"
+            echo "Rollback completed."
+            send_notification "failure" "Update failed and rolled back for $name (Post-hook Failed)" "$name"
+            exit 1
+        fi
+
         docker image prune -f
         echo ""
         echo "═══════════════════════════════════════════════════════════"
@@ -1352,6 +1386,9 @@ cmd_help() {
     log "  ${GREEN}uninstall${NC}             Remove $APP_NAME from system"
     log "  ${GREEN}version${NC}               Show version"
     log "  ${GREEN}help${NC}                  Show this help"
+    log ""
+    log "  ${DIM}For custom notifications, create/edit:${NC}"
+    log "  ${DIM}$CONFIG_DIR/notify.sh <status> <message> <project>${NC}"
     log ""
     log "${BOLD}EXAMPLES:${NC}"
     log "  ${DIM}# Install the tool${NC}"

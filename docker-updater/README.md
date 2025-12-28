@@ -46,6 +46,11 @@ The tool will be installed to `/usr/local/bin/docker-updater` and configuration 
    ```
    *This registers the project for auto-updates every 12 hours (default).*
 
+   Or for a specific time:
+   ```bash
+   sudo docker-updater add --at 03:00
+   ```
+
 2. **List registered projects**:
    ```bash
    docker-updater list
@@ -61,11 +66,17 @@ The tool will be installed to `/usr/local/bin/docker-updater` and configuration 
 ### Project Management
 | Command | Description |
 |:---|:---|
-| `add [dir] [hours]` | Register project for auto-updates (1-23 hours). |
+| `add [dir] [opts]` | Register project for auto-updates. |
 | `remove [dir]` | Unregister project and remove cron job. |
 | `list` | List all registered projects and their status. |
 | `enable [dir]` | Enable auto-updates for a registered project. |
 | `disable [dir]` | Disable auto-updates for a registered project. |
+
+**Add Options:**
+- `--interval <hours>`: Update every N hours (default: 12).
+- `--at <HH:MM>`: Update daily at specific time.
+- `--days <Mon,Tue>`: Update on specific days (use with `--at`).
+- `--cron <expr>`: Use custom cron expression.
 
 ### Container Operations
 | Command | Description |

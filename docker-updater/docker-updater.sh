@@ -75,6 +75,107 @@ fi
 # Helper Functions
 # ═══════════════════════════════════════════════════════════════════════════════
 
+normalize_day_token() {
+    local token="$1"
+    local upper
+    upper=$(echo "$token" | tr '[:lower:]' '[:upper:]')
+
+    case "$upper" in
+        SUN|SUNDAY) echo "Sun" ;;
+        MON|MONDAY) echo "Mon" ;;
+        TUE|TUESDAY|TUES) echo "Tue" ;;
+        WED|WEDNESDAY) echo "Wed" ;;
+        THU|THURSDAY|THUR) echo "Thu" ;;
+        FRI|FRIDAY) echo "Fri" ;;
+        SAT|SATURDAY) echo "Sat" ;;
+        *) echo "" ;;
+    esac
+}
+
+normalize_days() {
+    local raw="$1"
+    local cleaned
+    cleaned=$(echo "$raw" | tr -d ' ' | tr ';' ',')
+
+    if [ -z "$cleaned" ]; then
+        echo ""
+        return 1
+    fi
+
+    local result=""
+    local item
+    IFS=',' read -r -a items <<< "$cleaned"
+
+    for item in "${items[@]}"; do
+        [ -z "$item" ] && continue
+        local normalized
+        normalized=$(normalize_day_token "$item")
+        if [ -z "$normalized" ]; then
+            echo ""
+            return 1
+        fi
+        if [ -z "$result" ]; then
+            result="$normalized"
+        else
+            result="$result,$normalized"
+        fi
+    done
+
+    echo "$result"
+}
+
+normalize_time_input() {
+    local raw="$1"
+    local trimmed
+    trimmed=$(echo "$raw" | tr -d ' ')
+
+    if [[ "$trimmed" =~ ^([0-9]{1,2})[.:]([0-9]{2})([AaPp][Mm])$ ]]; then
+        local hour="${BASH_REMATCH[1]}"
+        local minute="${BASH_REMATCH[2]}"
+        local ampm="${BASH_REMATCH[3]}"
+        if [ "$hour" -lt 1 ] || [ "$hour" -gt 12 ]; then
+            return 1
+        fi
+        if [ "$minute" -gt 59 ]; then
+            return 1
+        fi
+        hour=$((10#$hour))
+        minute=$((10#$minute))
+        local hour24
+        local upper_ampm
+        upper_ampm=$(echo "$ampm" | tr '[:lower:]' '[:upper:]')
+        if [ "$upper_ampm" == "AM" ]; then
+            if [ "$hour" -eq 12 ]; then
+                hour24=0
+            else
+                hour24=$hour
+            fi
+        else
+            if [ "$hour" -eq 12 ]; then
+                hour24=12
+            else
+                hour24=$((hour + 12))
+            fi
+        fi
+        printf "%02d:%02d" "$hour24" "$minute"
+        return 0
+    fi
+
+    if [[ "$trimmed" =~ ^([0-9]{1,2})[.:]([0-9]{2})$ ]]; then
+        local hour="${BASH_REMATCH[1]}"
+        local minute="${BASH_REMATCH[2]}"
+        if [ "$hour" -gt 23 ] || [ "$minute" -gt 59 ]; then
+            return 1
+        fi
+        hour=$((10#$hour))
+        minute=$((10#$minute))
+        printf "%02d:%02d" "$hour" "$minute"
+        return 0
+    fi
+
+    return 1
+}
+
 acquire_lock() {
     local lock_name="${1:-global}"
     local lock_path="/var/run/$APP_NAME-${lock_name}.lock"
@@ -387,7 +488,15 @@ rebuild_cron() {
         while IFS='|' read -r path name interval status; do
             if [ "$status" == "enabled" ] && [ -n "$path" ]; then
                 local log_file="$LOG_DIR/${name}.log"
-                echo "0 */$interval * * * $INSTALL_PATH update-single \"$path\" >> \"$log_file\" 2>&1 $CRON_MARKER" >> "$tmp"
+                local cron_schedule
+                
+                if [[ "$interval" =~ ^[0-9]+$ ]]; then
+                    cron_schedule="0 */$interval * * *"
+                else
+                    cron_schedule="$interval"
+                fi
+                
+                echo "$cron_schedule $INSTALL_PATH update-single \"$path\" >> \"$log_file\" 2>&1 $CRON_MARKER" >> "$tmp"
             fi
         done < "$PROJECTS_FILE"
     fi
@@ -516,18 +625,66 @@ cmd_add() {
     require_root
     ensure_config
 
-    local dir="${1:-$(pwd)}"
-    local interval="${2:-12}"
+    local dir=""
+    local at_time=""
+    local days=""
+    local interval=""
+    local custom_cron=""
+    
+    while [[ $# -gt 0 ]]; do
+        case $1 in
+            --at)
+                if [ -z "$2" ]; then
+                    log_error "Option --at requires a value"
+                    exit 1
+                fi
+                at_time="$2"
+                shift 2
+                ;;
+            --days)
+                if [ -z "$2" ]; then
+                    log_error "Option --days requires a value"
+                    exit 1
+                fi
+                days="$2"
+                shift 2
+                ;;
+            --interval)
+                if [ -z "$2" ]; then
+                    log_error "Option --interval requires a value"
+                    exit 1
+                fi
+                interval="$2"
+                shift 2
+                ;;
+            --cron)
+                if [ -z "$2" ]; then
+                    log_error "Option --cron requires a value"
+                    exit 1
+                fi
+                custom_cron="$2"
+                shift 2
+                ;;
+            -*)
+                log_error "Unknown option: $1"
+                exit 1
+                ;;
+            *)
+                if [ -z "$dir" ]; then
+                    dir="$1"
+                elif [ -z "$interval" ] && [ -z "$at_time" ] && [ -z "$custom_cron" ]; then
+                    interval="$1"
+                fi
+                shift
+                ;;
+        esac
+    done
 
-    if ! [[ "$interval" =~ ^[1-9][0-9]*$ ]] || [ "$interval" -gt 23 ]; then
-        log_error "Interval must be a positive integer between 1 and 23 hours"
-        log_info "For longer intervals, consider using system cron directly"
-        exit 1
-    fi
+    dir="${dir:-$(pwd)}"
 
     # Resolve to absolute path
     dir="$(cd "$dir" 2>/dev/null && pwd)" || {
-        log_error "Directory not found: $1"
+        log_error "Directory not found: $dir"
         exit 1
     }
 
@@ -539,6 +696,61 @@ cmd_add() {
 
     local name=$(get_project_name "$dir")
     local services=$(get_services "$dir")
+    local final_schedule
+    local display_schedule
+
+    if [ -n "$custom_cron" ]; then
+        final_schedule="$custom_cron"
+        display_schedule="Cron: $custom_cron"
+    elif [ -n "$at_time" ]; then
+        local parsed
+        parsed=$(normalize_time_input "$at_time") || {
+            log_error "Invalid time format: $at_time"
+            log_info "Use HH:MM, HH.MM, or hh:mm AM/PM"
+            exit 1
+        }
+
+        local hour
+        hour=$(echo "$parsed" | cut -d: -f1)
+        local minute
+        minute=$(echo "$parsed" | cut -d: -f2)
+
+        hour=$((10#$hour))
+        minute=$((10#$minute))
+
+        local cron_days="*"
+        local display_days=""
+        if [ -n "$days" ]; then
+            local normalized_days
+            normalized_days=$(normalize_days "$days") || {
+                log_error "Invalid days format: $days"
+                log_info "Use Mon,Tue or full names like Tuesday"
+                exit 1
+            }
+            cron_days="$normalized_days"
+            display_days="$normalized_days"
+        fi
+
+        final_schedule="$minute $hour * * $cron_days"
+        display_schedule="At $parsed"
+        if [ "$cron_days" != "*" ]; then
+            display_schedule="$display_schedule on $display_days"
+        else
+            display_schedule="$display_schedule daily"
+        fi
+
+    elif [ -n "$interval" ]; then
+        if ! [[ "$interval" =~ ^[1-9][0-9]*$ ]] || [ "$interval" -gt 23 ]; then
+            log_error "Interval must be a positive integer between 1 and 23 hours"
+            log_info "For specific times, use --at \"HH:MM\""
+            exit 1
+        fi
+        final_schedule="$interval"
+        display_schedule="Every $interval hours"
+    else
+        final_schedule="12"
+        display_schedule="Every 12 hours"
+    fi
 
     log ""
     log "${CYAN}Registering Docker Project${NC}"
@@ -547,14 +759,14 @@ cmd_add() {
     log "  Name:       $name"
     log "  Compose:    $compose_file"
     log "  Services:   $services"
-    log "  Interval:   Every $interval hours"
+    log "  Schedule:   $display_schedule"
     log ""
 
-    add_project "$dir" "$interval"
+    add_project "$dir" "$final_schedule"
     log_success "Project registered"
 
     rebuild_cron
-    log_success "Cron job configured (runs every $interval hours)"
+    log_success "Cron job configured"
 
     log ""
     log "Commands:"
@@ -562,6 +774,10 @@ cmd_add() {
     log "  ${BOLD}$APP_NAME list${NC}       - View all projects"
     log "  ${BOLD}$APP_NAME logs${NC}       - View update logs"
 }
+
+
+
+
 
 cmd_remove() {
     require_root
@@ -596,8 +812,8 @@ cmd_list() {
         return
     fi
 
-    printf "${DIM}%-40s %-15s %-10s %-10s${NC}\n" "DIRECTORY" "NAME" "INTERVAL" "STATUS"
-    printf "${DIM}%-40s %-15s %-10s %-10s${NC}\n" "─────────" "────" "────────" "──────"
+    printf "${DIM}%-40s %-15s %-15s %-10s${NC}\n" "DIRECTORY" "NAME" "SCHEDULE" "STATUS"
+    printf "${DIM}%-40s %-15s %-15s %-10s${NC}\n" "─────────" "────" "────────" "──────"
 
     while IFS='|' read -r path name interval status; do
         [ -z "$path" ] && continue
@@ -610,8 +826,26 @@ cmd_list() {
 
         local status_color="${GREEN}"
         [ "$status" != "enabled" ] && status_color="${YELLOW}"
+        
+        local display_schedule
+        if [[ "$interval" =~ ^[0-9]+$ ]]; then
+            display_schedule="Every ${interval}h"
+        else
+            local min hour dom mon dow extra
+            read -r min hour dom mon dow extra <<< "$interval"
 
-        printf "%-40s %-15s %-10s ${status_color}%-10s${NC}\n" "$display_path" "$name" "${interval}h" "$status"
+            if [ -n "$extra" ] || [ -z "$dow" ]; then
+                display_schedule="Custom"
+            elif [ "$dom" == "*" ] && [ "$mon" == "*" ] && [ "$dow" == "*" ]; then
+                printf -v display_schedule "Daily %02d:%02d" "$hour" "$min"
+            elif [ "$dom" == "*" ] && [ "$mon" == "*" ]; then
+                printf -v display_schedule "%s %02d:%02d" "Wkly $dow" "$hour" "$min"
+            else
+                display_schedule="Custom"
+            fi
+        fi
+
+        printf "%-40s %-15s %-15s ${status_color}%-10s${NC}\n" "$display_path" "$name" "$display_schedule" "$status"
     done < "$PROJECTS_FILE"
 
     log ""
@@ -963,7 +1197,11 @@ cmd_help() {
     log "  $APP_NAME <command> [options]"
     log ""
     log "${BOLD}PROJECT MANAGEMENT:${NC}"
-    log "  ${GREEN}add${NC} [dir] [hours]     Register project for auto-updates (default: 12h)"
+    log "  ${GREEN}add${NC} [dir] [options]   Register project for auto-updates"
+    log "      --interval <hrs>    Every N hours (default: 12)"
+    log "      --at <HH:MM>        Daily at specific time"
+    log "      --days <Mon,Tue>    Specific days (used with --at)"
+    log "      --cron <expr>       Custom cron expression"
     log "  ${GREEN}remove${NC} [dir]          Unregister project"
     log "  ${GREEN}list${NC}                  List all registered projects"
     log "  ${GREEN}enable${NC} [dir]          Enable auto-updates for project"
@@ -992,17 +1230,14 @@ cmd_help() {
     log "  ${DIM}# Register current directory for 12-hour updates${NC}"
     log "  cd /opt/my-app && sudo $APP_NAME add"
     log ""
-    log "  ${DIM}# Register with custom interval (6 hours)${NC}"
-    log "  sudo $APP_NAME add /opt/my-app 6"
+    log "  ${DIM}# Register with specific time${NC}"
+    log "  sudo $APP_NAME add --at 03:00"
+    log ""
+    log "  ${DIM}# Register for specific days${NC}"
+    log "  sudo $APP_NAME add --at 03:00 --days Mon,Fri"
     log ""
     log "  ${DIM}# Update a specific project now${NC}"
     log "  $APP_NAME update /opt/my-app"
-    log ""
-    log "  ${DIM}# Update all registered projects${NC}"
-    log "  $APP_NAME update-all"
-    log ""
-    log "  ${DIM}# View registered projects${NC}"
-    log "  $APP_NAME list"
     log ""
 }
 
@@ -1069,9 +1304,17 @@ cmd_interactive() {
             4) cmd_stop "$current_dir" ;;
             5) cmd_restart "$current_dir" ;;
             a|A)
-                read -p "Update interval in hours [12]: " interval
-                interval="${interval:-12}"
-                cmd_add "$current_dir" "$interval"
+                log "Schedule Options:"
+                log "  Enter number (e.g. 12) for every N hours"
+                log "  Enter time (e.g. 01:00) for daily update"
+                log ""
+                read -p "Schedule [12]: " input
+                if [[ "$input" =~ : ]]; then
+                    cmd_add "$current_dir" --at "$input"
+                else
+                    input="${input:-12}"
+                    cmd_add "$current_dir" --interval "$input"
+                fi
                 ;;
             r|R) cmd_remove "$current_dir" ;;
             c|C) 

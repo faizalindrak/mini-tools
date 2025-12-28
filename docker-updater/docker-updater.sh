@@ -558,7 +558,7 @@ cmd_install() {
 
     # Get script source
     local script_source="${BASH_SOURCE[0]}"
-    if [ "$script_source" == "bash" ] || [ -z "$script_source" ]; then
+    if [ "$script_source" == "bash" ] || [ -z "$script_source" ] || [ ! -f "$script_source" ] || [ ! -r "$script_source" ]; then
         cat > /tmp/docker-updater-install.sh
         script_source="/tmp/docker-updater-install.sh"
     fi

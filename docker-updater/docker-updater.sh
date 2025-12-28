@@ -16,7 +16,7 @@ set -e
 # ═══════════════════════════════════════════════════════════════════════════════
 
 APP_NAME="docker-updater"
-APP_VERSION="1.1.0"
+APP_VERSION="1.2.0"
 APP_DESCRIPTION="Docker Container Auto-Update Manager"
 
 INSTALL_PATH="/usr/local/bin/$APP_NAME"
@@ -549,6 +549,46 @@ cmd_config() {
 
 SCRIPT_URL="https://raw.githubusercontent.com/faizalindrak/mini-tools/master/docker-updater/docker-updater.sh"
 
+cmd_self_update() {
+    require_root
+    
+    log_info "Checking for newer version..."
+    local tmp
+    tmp=$(create_temp)
+    
+    if ! curl -fsSL "$SCRIPT_URL" -o "$tmp"; then
+        log_error "Failed to download update script"
+        return 1
+    fi
+    
+    if ! grep -q "^#!/bin/bash" "$tmp"; then
+        log_error "Downloaded file is not a valid script"
+        return 1
+    fi
+    
+    local remote_version
+    remote_version=$(grep '^APP_VERSION=' "$tmp" | cut -d'"' -f2)
+    
+    if [ -z "$remote_version" ]; then
+        log_error "Could not detect version in remote script"
+        return 1
+    fi
+    
+    log_info "Current version: $APP_VERSION"
+    log_info "Remote version:  $remote_version"
+    
+    if [ "$APP_VERSION" == "$remote_version" ] && [ "$1" != "--force" ]; then
+        log_success "Already up to date."
+        return 0
+    fi
+    
+    log_info "Updating..."
+    cp "$tmp" "$INSTALL_PATH"
+    chmod +x "$INSTALL_PATH"
+    
+    log_success "Updated to version $remote_version"
+}
+
 cmd_install() {
     require_root
 
@@ -584,7 +624,7 @@ cmd_install() {
     if [ -d /etc/bash_completion.d ]; then
         cat > "/etc/bash_completion.d/$APP_NAME" << 'COMPLETION'
 _docker_updater_completions() {
-    local commands="add remove list update update-all enable disable logs status start stop restart help version install uninstall"
+    local commands="add remove list check update update-all enable disable logs status start stop restart help version install uninstall self-update"
 
     if [ "${#COMP_WORDS[@]}" == "2" ]; then
         COMPREPLY=($(compgen -W "$commands" -- "${COMP_WORDS[1]}"))
@@ -860,6 +900,87 @@ cmd_list() {
     # Show cron status
     local cron_count=$(crontab -l 2>/dev/null | grep -c "$CRON_MARKER" || echo "0")
     log "${DIM}Active cron jobs: $cron_count${NC}"
+    log ""
+}
+
+cmd_check() {
+    local dir="${1:-$(pwd)}"
+    dir="$(cd "$dir" 2>/dev/null && pwd)" || {
+        log_error "Directory not found: $1"
+        exit 1
+    }
+
+    local compose_file
+    compose_file=$(get_compose_file "$dir") || {
+        log_error "No docker-compose.yml found in $dir"
+        exit 1
+    }
+
+    local name
+    name=$(get_project_name "$dir")
+
+    log ""
+    log "${CYAN}Checking updates for: $name${NC}"
+    log "${DIM}$dir${NC}"
+    log ""
+
+    cd "$dir" || exit 1
+
+    log_info "Pulling latest images (this may take a moment)..."
+    if ! docker compose pull --quiet; then
+        log_error "Failed to pull images"
+        return 1
+    fi
+
+    local updates_found=0
+    local services
+    services=$(docker compose ps --services)
+
+    log_info "Comparing running containers with pulled images..."
+    log ""
+    
+    printf "${DIM}%-20s %-30s %-15s${NC}\n" "SERVICE" "IMAGE" "STATUS"
+    printf "${DIM}%-20s %-30s %-15s${NC}\n" "───────" "─────" "──────"
+
+    for service in $services; do
+        local cid
+        cid=$(docker compose ps -q "$service")
+        
+        if [ -z "$cid" ]; then
+            printf "%-20s %-30s ${YELLOW}%-15s${NC}\n" "$service" "-" "Not Running"
+            continue
+        fi
+
+        local running_image_id
+        running_image_id=$(docker inspect --format='{{.Image}}' "$cid")
+        
+        local image_name
+        image_name=$(docker inspect --format='{{.Config.Image}}' "$cid")
+        
+        local current_tag_id
+        current_tag_id=$(docker inspect --format='{{.Id}}' "$image_name" 2>/dev/null)
+
+        local display_image="$image_name"
+        if [ ${#image_name} -gt 28 ]; then
+            display_image="...${image_name: -25}"
+        fi
+
+        if [ -z "$current_tag_id" ]; then
+             printf "%-20s %-30s ${RED}%-15s${NC}\n" "$service" "$display_image" "Unknown"
+        elif [ "$running_image_id" != "$current_tag_id" ]; then
+            printf "%-20s %-30s ${GREEN}%-15s${NC}\n" "$service" "$display_image" "Update Available"
+            ((updates_found++))
+        else
+            printf "%-20s %-30s ${DIM}%-15s${NC}\n" "$service" "$display_image" "Up to date"
+        fi
+    done
+
+    log ""
+    if [ "$updates_found" -gt 0 ]; then
+        log "${GREEN}Found $updates_found update(s). Run '$APP_NAME update' to apply.${NC}"
+    else
+        log "${GREEN}All services are up to date.${NC}"
+    fi
     log ""
 }
 
@@ -1215,6 +1336,7 @@ cmd_help() {
     log "  ${GREEN}disable${NC} [dir]         Disable auto-updates for project"
     log ""
     log "${BOLD}CONTAINER OPERATIONS:${NC}"
+    log "  ${GREEN}check${NC} [dir]           Check for available updates (dry-run)"
     log "  ${GREEN}update${NC} [dir]          Pull latest images and recreate containers"
     log "  ${GREEN}update-all${NC}            Update all registered projects"
     log "  ${GREEN}status${NC} [dir]          Show container status"
@@ -1225,6 +1347,7 @@ cmd_help() {
     log ""
     log "${BOLD}SYSTEM:${NC}"
     log "  ${GREEN}config${NC} [key] [val]    Get or set global configuration"
+    log "  ${GREEN}self-update${NC}           Update this tool to the latest version"
     log "  ${GREEN}install${NC}               Install $APP_NAME to system"
     log "  ${GREEN}uninstall${NC}             Remove $APP_NAME from system"
     log "  ${GREEN}version${NC}               Show version"
@@ -1361,11 +1484,13 @@ main() {
 
     case "$command" in
         install)        cmd_install "$@" ;;
+        self-update)    cmd_self_update "$@" ;;
         uninstall)      cmd_uninstall "$@" ;;
         config)         cmd_config "$@" ;;
         add)            cmd_add "$@" ;;
         remove|rm)      cmd_remove "$@" ;;
         list|ls)        cmd_list "$@" ;;
+        check)          cmd_check "$@" ;;
         update)         cmd_update "$@" ;;
         update-single)  cmd_update_single "$@" ;;
         update-all)     cmd_update_all "$@" ;;

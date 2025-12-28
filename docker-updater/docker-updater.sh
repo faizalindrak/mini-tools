@@ -16,7 +16,7 @@ set -e
 # ═══════════════════════════════════════════════════════════════════════════════
 
 APP_NAME="docker-updater"
-APP_VERSION="1.0.0"
+APP_VERSION="1.1.0"
 APP_DESCRIPTION="Docker Container Auto-Update Manager"
 
 INSTALL_PATH="/usr/local/bin/$APP_NAME"

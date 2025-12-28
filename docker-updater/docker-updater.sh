@@ -547,6 +547,8 @@ cmd_config() {
     fi
 }
 
+SCRIPT_URL="https://raw.githubusercontent.com/faizalindrak/mini-tools/master/docker-updater/docker-updater.sh"
+
 cmd_install() {
     require_root
 
@@ -556,17 +558,16 @@ cmd_install() {
     log "${CYAN}╚══════════════════════════════════════════════════════════╝${NC}"
     log ""
 
-    # Get script source
     local script_source="${BASH_SOURCE[0]}"
+    
     if [ "$script_source" == "bash" ] || [ -z "$script_source" ] || [ ! -f "$script_source" ] || [ ! -r "$script_source" ]; then
-        if [ -f "$PIPED_SCRIPT_SOURCE" ]; then
-            script_source="$PIPED_SCRIPT_SOURCE"
-        else
-            log_error "Cannot determine script source. Download the script first:"
-            log_info "  curl -fsSL https://raw.githubusercontent.com/faizalindrak/mini-tools/master/docker-updater/docker-updater.sh -o /tmp/docker-updater.sh"
-            log_info "  sudo bash /tmp/docker-updater.sh install"
+        log_info "Downloading script..."
+        script_source="/tmp/docker-updater-install.sh"
+        if ! curl -fsSL "$SCRIPT_URL" -o "$script_source"; then
+            log_error "Failed to download script"
             exit 1
         fi
+        chmod +x "$script_source"
     fi
 
     # Copy to install path
@@ -1353,14 +1354,6 @@ cmd_interactive() {
 # ═══════════════════════════════════════════════════════════════════════════════
 # Main
 # ═══════════════════════════════════════════════════════════════════════════════
-
-PIPED_SCRIPT_SOURCE=""
-if [ ! -t 0 ] && { [ "${BASH_SOURCE[0]}" == "bash" ] || [ -z "${BASH_SOURCE[0]}" ] || [ ! -f "${BASH_SOURCE[0]}" ]; }; then
-    PIPED_SCRIPT_SOURCE="/tmp/docker-updater-install.sh"
-    cat > "$PIPED_SCRIPT_SOURCE"
-    chmod +x "$PIPED_SCRIPT_SOURCE"
-    exec "$PIPED_SCRIPT_SOURCE" "$@"
-fi
 
 main() {
     local command="${1:-}"
